@@ -4,13 +4,18 @@ use nix::unistd::{self, ForkResult, fork};
 use nix::sys::wait::wait;
 
 fn main() {
-    let args:Vec<_> = env::args().collect();
-    let cmd = &args[1];
-    println!("Launching: {}", cmd);
-    create_init(cmd);
+    let mut args:Vec<_> = env::args().collect();
+    if let Some(cmd) = args.get(1) { 
+        println!("Launching: {}", cmd);
+        args.remove(0);
+        create_init(args);
+    } else { 
+        println!("Usage: {} command", args[0]);
+        std::process::exit(1);
+    }
 }
 
-fn create_init(c : &str) {
+fn create_init(c : Vec<String>) {
     unsharenamespaces();
     match unsafe { fork() } { 
         Err(_) => panic!("fork failed"),
@@ -22,7 +27,7 @@ fn create_init(c : &str) {
 }
 
 
-fn init(c: &str) {
+fn init(c: Vec<String>) {
     let pid = unistd::getpid();
     println!("Init's pid is {}", pid);
     launch_and_wait(c);
@@ -30,7 +35,7 @@ fn init(c: &str) {
     std::process::exit(1);
 }
 
-fn launch_and_wait(c : &str) {
+fn launch_and_wait(c : Vec<String>) {
     match unsafe { fork() } {
         Err(_) => panic!("fork failed"),
         Ok(ForkResult::Child) => launch(c),
@@ -43,6 +48,8 @@ fn launch_and_wait(c : &str) {
 fn unsharenamespaces() {
     let flags = libc::CLONE_NEWUTS | libc::CLONE_NEWPID;
     let res = unsafe { libc::unshare(flags) };
+    let errmsg = CString::new("unshare()").unwrap();
+    unsafe { libc::perror(errmsg.as_ptr()); }
     if (res != 0) { panic!("unshare failed!"); }
     let hostname = "container";
     let hostname_r = CString::new(hostname).unwrap();
@@ -51,9 +58,10 @@ fn unsharenamespaces() {
     }
 }
 
-fn launch(c : &str) {
-    unsharenamespaces();
-    let cmd = CString::new(c).unwrap();
-    let args = [cmd];
+fn launch(c : Vec<String>) {
+    let args : Vec<CString> = c
+        .into_iter()
+        .map(|s| CString::new(s).unwrap())
+        .collect();
     unistd::execv(&args[0], &args);
 }
