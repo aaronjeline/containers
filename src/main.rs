@@ -28,6 +28,7 @@ fn create_init(c : Vec<String>) {
 
 
 fn init(c: Vec<String>) {
+    unsafe { nix::env::clearenv(); }
     let pid = unistd::getpid();
     println!("Init's pid is {}", pid);
     launch_and_wait(c);
@@ -46,10 +47,12 @@ fn launch_and_wait(c : Vec<String>) {
 }
 
 fn unsharenamespaces() {
-    let flags = libc::CLONE_NEWUTS | libc::CLONE_NEWPID;
+    let flags = libc::CLONE_NEWUTS | libc::CLONE_NEWPID | libc::CLONE_NEWNS;
     let res = unsafe { libc::unshare(flags) };
     let errmsg = CString::new("unshare()").unwrap();
-    unsafe { libc::perror(errmsg.as_ptr()); }
+    if res != 0 {
+        unsafe { libc::perror(errmsg.as_ptr()); }
+    }
     if (res != 0) { panic!("unshare failed!"); }
     let hostname = "container";
     let hostname_r = CString::new(hostname).unwrap();
