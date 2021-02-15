@@ -1,0 +1,8 @@
+[package]
+authors = ["kali"]
+edition = "2018"
+name = "containers"
+version = "0.1.0"
+[dependencies]
+libc = "*"
+nix = "*"
