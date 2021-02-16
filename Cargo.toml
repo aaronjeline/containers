@@ -4,5 +4,6 @@ edition = "2018"
 name = "containers"
 version = "0.1.0"
 [dependencies]
+lazy_static = "*"
 libc = "*"
 nix = "*"
