@@ -3,18 +3,29 @@ use std::env;
 use nix::unistd::{self, ForkResult, fork};
 use nix::sys::wait::wait;
 use nix::mount;
+use nix::sys::stat::*;
 
 fn main() {
     checkamroot();
     let mut args:Vec<_> = env::args().collect();
     if let Some(cmd) = args.get(1) { 
-        println!("Launching: {}", cmd);
-        args.remove(0);
-        create_init(args);
+        if cmd == "run" {
+            args.remove(0);
+            args.remove(0);
+            create_init(args);
+        } else {
+            printusage(&args[0]);
+        }
     } else { 
-        println!("Usage: {} command", args[0]);
-        std::process::exit(1);
+        printusage(&args[0]);
     }
+}
+
+fn printusage(path : &str) {
+    println!("Usage:");
+    println!("{} run <cmd>", path);
+    println!("{} exec <id> <cmd>", path);
+    std::process::exit(1);
 }
 
 fn checkamroot() { 
@@ -30,6 +41,7 @@ fn create_init(c : Vec<String>) {
         Err(_) => panic!("fork failed"),
         Ok(ForkResult::Child) => init(c),
         Ok(ForkResult::Parent { child, .. }) => {
+            println!("Container id: {}", child);
             wait();
             println!("Container is dead, unmounting fs");
             match cleanup() {
@@ -72,10 +84,16 @@ fn init(c: Vec<String>) {
     let pid = unistd::getpid();
     match create_root() { 
         Ok(()) => {
+            cleanup_dev();
             setup_env();
+            match setup_dev() {
+                Ok(()) => (),
+                Err(e) => println!("Setting up dev failed: {}", e),
+            };
             println!("Init's pid is {}", pid);
             launch_and_wait(c);
             println!("Init died!");
+            cleanup_dev();
             std::process::exit(0);
         }, 
         Err(e) => {
@@ -83,6 +101,20 @@ fn init(c: Vec<String>) {
             std::process::exit(1);
         }
     }
+}
+
+//Create /dev/null and /dev/zero
+fn setup_dev() -> nix::Result<()> {
+    let access = Mode::from_bits(0o666).unwrap();
+    
+    mknod("/dev/null", SFlag::S_IFCHR, access, makedev(1,3))?;
+    mknod("/dev/zero", SFlag::S_IFCHR, access, makedev(1,5))?;
+    Ok(())
+}
+
+fn cleanup_dev() {
+    unistd::unlink("/dev/null");
+    unistd::unlink("/dev/zero");
 }
 
 fn setup_env() {
@@ -101,9 +133,10 @@ fn create_root() -> nix::Result<()> {
     mount::mount(Some("proc"), "root/proc", Some("proc"), empty_flags, none)?;
     let userall = nix::sys::stat::Mode::S_IRWXU;
     unistd::mkdir("rootfs/oldfs", userall);
-    println!("Pivoting root");
     //unistd::pivot_root("./root", "./root/oldfs")?;
     //unistd::chdir("/")?;
+    unistd::chroot("root").unwrap();
+    unistd::chdir("/");
     Ok(())
 }
 
@@ -133,13 +166,16 @@ fn unsharenamespaces() {
 }
 
 fn launch(c : Vec<String>) {
-    // this is a hack and should be pivot root
-    // as is it is probably easy to escape?
-    unistd::chroot("root").unwrap();
-    unistd::chdir("/");
+    // this is a hack and should be using pivot root
     let args : Vec<CString> = c
         .into_iter()
         .map(|s| CString::new(s).unwrap())
         .collect();
-    unistd::execv(&args[0], &args).unwrap();
+    match unistd::execv(&args[0], &args) { 
+        Ok(_) => { panic!("Impossible"); },
+        Err(e) => { 
+            println!("Failed to launch {:?}", args);
+            println!("Errno: {}", e);
+        }
+    }
 }

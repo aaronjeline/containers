@@ -1,5 +1,5 @@
 [package]
-authors = ["kali"]
+authors = ["Aaron Eline"]
 edition = "2018"
 name = "containers"
 version = "0.1.0"
