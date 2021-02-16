@@ -1,9 +1,9 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::env;
 use nix::unistd::{self, ForkResult, fork};
 use nix::sys::wait::wait;
-use nix::mount;
 use nix::sys::stat::*;
+use nix::unistd::Pid;
 use lazy_static::*;
 
 type ProofResult = nix::Result<IsolationProof>;
@@ -15,13 +15,32 @@ fn main() {
         if cmd == "run" {
             args.remove(0);
             args.remove(0);
-            create_init(args);
+            if let Err(e) =  create_init(args) { 
+                println!("Error creating init: {}", e);
+                std::process::exit(1);
+            }
+        } else if cmd == "exec" {
+            if let Some(pid) = 
+                args.get(2).and_then(&parse_pid) {
+                    args.remove(0);
+                    args.remove(0);
+                    args.remove(0);
+                    if let Err(e) = exec(pid, args) { 
+                        println!("Error execing: {}", e);
+                    }
+            } else {
+                printusage(&args[0]);
+            }
         } else {
             printusage(&args[0]);
         }
     } else { 
         printusage(&args[0]);
     }
+}
+
+fn parse_pid(s : &String) -> Option<Pid> { 
+    s.parse::<i32>().ok().map(|i| Pid::from_raw(i))
 }
 
 fn printusage(path : &str) {
@@ -31,10 +50,29 @@ fn printusage(path : &str) {
     std::process::exit(1);
 }
 
+// Ensure we are root
 fn checkamroot() { 
     if !unistd::geteuid().is_root() { 
         panic!("Cannot work without effective root!");
     }
+}
+
+fn exec(pid : Pid, cmd : Vec<String>) ->  nix::Result<()> {
+    if dir_exists(format!("/proc/{}", pid)) {
+        println!("Execing...");
+        setup_env();
+        let proof = clone_namespaces(pid)?;
+        launch(cmd, proof);
+    } else { 
+        println!("Pid: {} does not exist!", pid);
+        std::process::exit(1);
+    }
+}
+
+
+
+fn dir_exists(path: String) -> bool {
+    stat(path.as_str()).is_ok()
 }
 
 
@@ -42,10 +80,10 @@ fn create_init(c : Vec<String>) -> nix::Result<()> {
     let proof = isolation::enter_namespace()?;
     match unsafe { fork() } { 
         Err(_) => panic!("fork failed"),
-        Ok(ForkResult::Child) => { init(c, proof); Ok(()) },
+        Ok(ForkResult::Child) => { init(c, proof)?; Ok(()) },
         Ok(ForkResult::Parent { child, .. }) => {
             println!("Container id: {}", child);
-            wait();
+            wait()?;
             println!("Container is dead, unmounting fs");
             match cleanup() {
                 Ok(()) => (),
@@ -93,12 +131,12 @@ fn init(c: Vec<String>, np : NamespaceProof) -> nix::Result<()> {
     println!("Init's pid is {}", pid);
     let proof = launch_and_wait(c, proof);
     println!("Init died!");
-    let proof = cleanup_dev(proof);
+    cleanup_dev(proof);
     Ok(())
 }
 
 lazy_static! {
-    static ref devs : Vec<(&'static str, dev_t)> = 
+    static ref DEVS : Vec<(&'static str, dev_t)> = 
         vec![("/dev/null", makedev(1,3)),
              ("/dev/zero", makedev(1,5)),
              ("/dev/random", makedev(1,8)),
@@ -109,7 +147,7 @@ lazy_static! {
 fn setup_dev(p : IsolationProof) -> ProofResult {
     let access = Mode::from_bits(0o666).unwrap();
 
-    for (name, dev) in devs.iter() {
+    for (name, dev) in DEVS.iter() {
         mknod(*name, SFlag::S_IFCHR, access, *dev)?;
     }
     
@@ -117,23 +155,32 @@ fn setup_dev(p : IsolationProof) -> ProofResult {
 }
 
 fn cleanup_dev(p : IsolationProof) -> IsolationProof {
-    for (name, _) in devs.iter() { 
-        unistd::unlink(*name);
+    for (name, _) in DEVS.iter() { 
+        unistd::unlink(*name).unwrap();
     }
     p
 }
 
 fn setup_env() {
-    unsafe { nix::env::clearenv(); }
+    match unsafe { nix::env::clearenv() } { 
+        Ok(()) => (),
+        Err(e) => println!("Error clearing env: {}", e),
+    };
     env::set_var("PATH", "/sbin:/bin/:/usr/bin/:/usr/sbin");
     env::set_var("TERM", "xterm-256color");
 }
 
 mod isolation { 
-    use std::ffi::{CStr, CString};
-    use nix::{unistd, mount};
+    use std::ffi::CString;
+    use nix::sys::wait::wait;
+    use nix::{unistd, mount, unistd::{ForkResult, fork}};
+    use nix::unistd::Pid;
+    use nix::sys::stat;
+    use nix::fcntl;
+    use nix::sched::*;
 
-    // This zero sized type is a proof that we entered isoloation
+    // Zero sized types that ensure isolation functions
+    // are used _before_ changing settings and launching programs
     pub struct IsolationProof {}
     pub struct NamespaceProof {}
 
@@ -141,7 +188,36 @@ mod isolation {
         IsolationProof::isolate_fs(p)
     }
 
+    pub fn clone_namespaces(p : Pid) -> nix::Result<IsolationProof> { 
+        IsolationProof::clone_namespaces(p)
+    }
+
     impl IsolationProof { 
+
+        pub fn clone_namespaces(pid: Pid) -> nix::Result<Self> { 
+            let clones = vec!["ns/pid", "ns/mnt", "ns/uts"];
+            for dest in clones.iter() { 
+                let src = format!("/proc/{}/{}", pid, dest);
+                let fd = fcntl::open(src.as_str(), fcntl::OFlag::O_RDONLY, 
+                                     stat::Mode::empty())?;
+                setns(fd, CloneFlags::empty())?;
+                unistd::close(fd)?;
+            }
+            let root_path = format!("/proc/{}/root", pid);
+            unistd::chroot(root_path.as_str())?;
+            unistd::chdir("/")?;
+
+            match unsafe { fork() } { 
+                Err(e) => { println!("fork(): {}", e); std::process::exit(1); },
+                Ok(ForkResult::Parent { child : _ , ..}) => { 
+                    wait()?;
+                    std::process::exit(0);
+                },
+                Ok(ForkResult::Child) => (),
+            };
+            Ok(IsolationProof {})
+        }
+
         pub fn isolate_fs(_ : NamespaceProof) -> nix::Result<Self> { 
             // Path to our root directory
             let flags = mount::MsFlags::MS_BIND | mount::MsFlags::MS_PRIVATE;
@@ -151,12 +227,12 @@ mod isolation {
             let empty_flags = mount::MsFlags::empty();
             mount::mount(Some("proc"), "root/proc", 
                          Some("proc"), empty_flags, none)?;
-            let userall = nix::sys::stat::Mode::S_IRWXU;
-            unistd::mkdir("rootfs/oldfs", userall);
+            // This is the correct solution but it's not working yet 
+            //unistd::mkdir("rootfs/oldfs", userall)?;
             //unistd::pivot_root("./root", "./root/oldfs")?;
             //unistd::chdir("/")?;
             unistd::chroot("root").unwrap();
-            unistd::chdir("/");
+            unistd::chdir("/")?;
             Ok(IsolationProof {})
         }
     }
@@ -166,7 +242,6 @@ mod isolation {
             let flags = 
              libc::CLONE_NEWUTS | libc::CLONE_NEWPID | libc::CLONE_NEWNS;
             let res = unsafe { libc::unshare(flags) };
-            let errmsg = CString::new("unshare()").unwrap();
             if res != 0 {
                 return Err(nix::Error::Sys(nix::errno::Errno::last()));
             }
@@ -191,8 +266,11 @@ fn launch_and_wait(c : Vec<String>, p : IsolationProof) -> IsolationProof {
     match unsafe { fork() } {
         Err(_) => panic!("fork failed"),
         Ok(ForkResult::Child) => launch(c, p),
-        Ok(ForkResult::Parent { child, .. }) => { 
-           wait(); 
+        Ok(ForkResult::Parent { child : _, .. }) => { 
+           match wait() { 
+               Ok(_) => (),
+               Err(e) => println!("Error waiting: {}", e),
+           };
            p
         }
     }
