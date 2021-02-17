@@ -156,7 +156,9 @@ fn setup_dev(p : IsolationProof) -> ProofResult {
 
 fn cleanup_dev(p : IsolationProof) -> IsolationProof {
     for (name, _) in DEVS.iter() { 
-        unistd::unlink(*name).unwrap();
+        match unistd::unlink(*name) { 
+            _ => ()
+        };
     }
     p
 }
