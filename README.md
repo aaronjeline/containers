@@ -14,7 +14,8 @@ Example: `./containers run /bin/bash`
 Containers will output their ID (just the PID of the init process)
 
 ### Executing a command in an already running container
-The `exec` subcommand executes the following command in an existing container. Specify the contaienr by PID
+The `exec` subcommand executes the following command in an existing container. Specify the contaienr by PID.
+
 Example: `./containers exec 213 /bin/bash`
 
 
